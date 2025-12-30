@@ -1,3 +1,4 @@
+export { PrecognitionProvider } from "./PrecognitionContext";
 export { PrecognitionDebug } from "./PrecognitionDebug";
 export { usePrecognition } from "./usePrecognition";
 export type {

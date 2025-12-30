@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { usePrecognitionContext } from "./PrecognitionContext";
 import { checkEnvironmentSafety } from "./safety";
 import { VectorIntentEngine, type VectorConfig } from "./vector-intent";
 
@@ -21,6 +22,9 @@ export function usePrecognition<T>(
   action: (signal: AbortSignal) => Promise<T>,
   config: PrecognitionConfig = {}
 ): PrecognitionResult<T> {
+  // 1. CONSUME CONTEXT
+  const { historyRef, isEnabled: isGlobalEnabled } = usePrecognitionContext();
+
   const {
     sensitivity = 0.6,
     gracePeriod = 2500,
@@ -48,12 +52,14 @@ export function usePrecognition<T>(
 
   useEffect(() => {
     checkEnvironmentSafety().then((safe) => {
-      setSafe(safe);
-      if (!safe && debug)
-        console.warn("⚠️ [Precognition] Disabled: Environment Unsafe");
+      // Logic AND: Global Toggle (Touch check) && Environment Check (Battery/DataSaver)
+      setSafe(safe && isGlobalEnabled);
+      if ((!safe || !isGlobalEnabled) && debug)
+        console.warn(
+          "⚠️ [Precognition] Disabled: Environment Unsafe or Touch Device"
+        );
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [debug, isGlobalEnabled]);
 
   const triggerSpeculation = useCallback(() => {
     if (shadowPromise.current) return;
@@ -104,18 +110,27 @@ export function usePrecognition<T>(
   // 2. THE PHYSICS LOOP
   useEffect(() => {
     if (!isEnvironmentSafe) return;
+
     isMounted.current = true;
     let rAFId: number;
     const abortThreshold = sensitivity * 0.5;
 
     const checkIntent = () => {
-      if (!targetRef.current) {
-        rAFId = requestAnimationFrame(checkIntent);
-        return;
-      }
+      // Loop Management
+      rAFId = requestAnimationFrame(checkIntent);
+
+      if (!targetRef.current) return;
+
+      // GET HISTORY FROM CONTEXT REF (O(1), no React overhead)
+      const currentHistory = historyRef.current;
+
+      // Optimization: Don't calculate if mouse hasn't moved (history is empty or stale)
+      // (Optional: You could store lastTimestamp and check against history[last].timestamp)
 
       const rect = targetRef.current.getBoundingClientRect();
-      const score = engine.current.getIntentScore(rect);
+
+      // PASS HISTORY TO ENGINE
+      const score = engine.current.getIntentScore(rect, currentHistory);
 
       const currentStatus = statusRef.current;
 
@@ -145,18 +160,14 @@ export function usePrecognition<T>(
           }
         }
       }
-
-      rAFId = requestAnimationFrame(checkIntent);
     };
 
+    // Start Loop
     rAFId = requestAnimationFrame(checkIntent);
-    const handleMouseMove = (e: MouseEvent) => engine.current.update(e);
-    window.addEventListener("mousemove", handleMouseMove, { passive: true });
 
     return () => {
       isMounted.current = false;
       cancelAnimationFrame(rAFId);
-      window.removeEventListener("mousemove", handleMouseMove);
       if (graceTimer.current) clearTimeout(graceTimer.current);
       if (abortController.current) abortController.current.abort();
     };
@@ -168,6 +179,7 @@ export function usePrecognition<T>(
     cancelSpeculation,
     debug,
     isEnvironmentSafe,
+    historyRef, // Added historyRef dependency
   ]);
 
   const commit = useCallback(async (): Promise<T> => {
