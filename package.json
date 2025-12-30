@@ -1,6 +1,6 @@
 {
   "name": "react-precognition",
-  "version": "1.0.1",
+  "version": "2.0.0",
   "description": "A predictive React hook that forks the future. Zero-latency interactions via cursor intent analysis.",
   "keywords": [
     "react",

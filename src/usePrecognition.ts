@@ -1,7 +1,12 @@
+// src/usePrecognition.ts
 import { useCallback, useEffect, useRef, useState } from "react";
 import { usePrecognitionContext } from "./PrecognitionContext";
 import { checkEnvironmentSafety } from "./safety";
-import { VectorIntentEngine, type VectorConfig } from "./vector-intent";
+import {
+  VectorIntentEngine,
+  type Point,
+  type VectorConfig,
+} from "./vector-intent";
 
 export type SpeculationStatus = "idle" | "speculating" | "ready" | "committed";
 
@@ -22,8 +27,8 @@ export function usePrecognition<T>(
   action: (signal: AbortSignal) => Promise<T>,
   config: PrecognitionConfig = {}
 ): PrecognitionResult<T> {
-  // 1. CONSUME CONTEXT
-  const { historyRef, isEnabled: isGlobalEnabled } = usePrecognitionContext();
+  // 1. Connect to the Hive Mind
+  const { subscribe, isEnabled: isGlobalEnabled } = usePrecognitionContext();
 
   const {
     sensitivity = 0.6,
@@ -36,37 +41,38 @@ export function usePrecognition<T>(
   const [result, setResult] = useState<T | null>(null);
   const [isEnvironmentSafe, setSafe] = useState(true);
 
+  // Mutable refs for state to be accessible inside the stable callback
   const statusRef = useRef(status);
+  const shadowPromise = useRef<Promise<T> | null>(null);
+  const graceTimer = useRef<number | null>(null);
+  const abortController = useRef<AbortController | null>(null);
+  const isMounted = useRef(true);
+
+  // Sync state to ref
   useEffect(() => {
     statusRef.current = status;
   }, [status]);
 
-  const engine = useRef<VectorIntentEngine>(
-    new VectorIntentEngine(vectorConfig)
-  );
-
-  const shadowPromise = useRef<Promise<T> | null>(null);
-  const graceTimer = useRef<number | null>(null);
-  const isMounted = useRef(true);
-  const abortController = useRef<AbortController | null>(null);
+  // The Physics Engine (Stateless instance)
+  const engine = useRef(new VectorIntentEngine(vectorConfig));
 
   useEffect(() => {
     checkEnvironmentSafety().then((safe) => {
-      // Logic AND: Global Toggle (Touch check) && Environment Check (Battery/DataSaver)
       setSafe(safe && isGlobalEnabled);
-      if ((!safe || !isGlobalEnabled) && debug)
+      if ((!safe || !isGlobalEnabled) && debug) {
         console.warn(
-          "⚠️ [Precognition] Disabled: Environment Unsafe or Touch Device"
+          "⚠️ [Precognition] Disabled: Environment or Device Unsafe"
         );
+      }
     });
   }, [debug, isGlobalEnabled]);
 
+  // --- ACTIONS (Same as v1) ---
   const triggerSpeculation = useCallback(() => {
     if (shadowPromise.current) return;
-
     if (debug) console.log("🔮 [Precognition] Speculating...");
-    setStatus("speculating");
 
+    setStatus("speculating");
     const controller = new AbortController();
     abortController.current = controller;
 
@@ -83,17 +89,10 @@ export function usePrecognition<T>(
         }
       })
       .catch((err) => {
-        if (err.name === "AbortError") {
-          if (debug) console.log("🛑 [Precognition] Speculation Aborted");
-        } else {
-          if (debug) console.warn("Speculation failed", err);
-        }
-
-        if (isMounted.current) {
-          if (shadowPromise.current === promise) {
-            setStatus("idle");
-            shadowPromise.current = null;
-          }
+        if (err.name !== "AbortError" && debug) console.warn(err);
+        if (isMounted.current && shadowPromise.current === promise) {
+          setStatus("idle");
+          shadowPromise.current = null;
         }
       });
   }, [action, debug]);
@@ -107,31 +106,18 @@ export function usePrecognition<T>(
     setStatus("idle");
   }, []);
 
-  // 2. THE PHYSICS LOOP
-  useEffect(() => {
-    if (!isEnvironmentSafe) return;
+  // --- THE TICK HANDLER (v3 logic) ---
+  // This function runs every frame, called by the Provider.
+  const handleTick = useCallback(
+    (history: Point[]) => {
+      if (!targetRef.current || !isEnvironmentSafe) return;
 
-    isMounted.current = true;
-    let rAFId: number;
-    const abortThreshold = sensitivity * 0.5;
-
-    const checkIntent = () => {
-      // Loop Management
-      rAFId = requestAnimationFrame(checkIntent);
-
-      if (!targetRef.current) return;
-
-      // GET HISTORY FROM CONTEXT REF (O(1), no React overhead)
-      const currentHistory = historyRef.current;
-
-      // Optimization: Don't calculate if mouse hasn't moved (history is empty or stale)
-      // (Optional: You could store lastTimestamp and check against history[last].timestamp)
-
+      // 1. Calculate Score
       const rect = targetRef.current.getBoundingClientRect();
+      const score = engine.current.getIntentScore(rect, history);
+      const abortThreshold = sensitivity * 0.5;
 
-      // PASS HISTORY TO ENGINE
-      const score = engine.current.getIntentScore(rect, currentHistory);
-
+      // 2. State Machine Logic
       const currentStatus = statusRef.current;
 
       if (currentStatus === "idle") {
@@ -144,6 +130,7 @@ export function usePrecognition<T>(
         }
       } else if (currentStatus === "ready") {
         if (score < abortThreshold) {
+          // Start Decay Timer
           if (!graceTimer.current) {
             graceTimer.current = window.setTimeout(() => {
               if (debug) console.log("🗑️ [Precognition] Garbage Collecting");
@@ -154,50 +141,51 @@ export function usePrecognition<T>(
             }, gracePeriod);
           }
         } else {
+          // Reset Decay Timer (User looked back)
           if (graceTimer.current) {
             clearTimeout(graceTimer.current);
             graceTimer.current = null;
           }
         }
       }
-    };
+    },
+    [
+      targetRef,
+      isEnvironmentSafe,
+      sensitivity,
+      gracePeriod,
+      triggerSpeculation,
+      cancelSpeculation,
+      debug,
+    ]
+  );
 
-    // Start Loop
-    rAFId = requestAnimationFrame(checkIntent);
+  // --- REGISTRATION ---
+  useEffect(() => {
+    isMounted.current = true;
+    // Subscribe to the global loop
+    const unsubscribe = subscribe(handleTick);
 
     return () => {
       isMounted.current = false;
-      cancelAnimationFrame(rAFId);
+      unsubscribe(); // Remove from provider
       if (graceTimer.current) clearTimeout(graceTimer.current);
       if (abortController.current) abortController.current.abort();
     };
-  }, [
-    targetRef,
-    sensitivity,
-    gracePeriod,
-    triggerSpeculation,
-    cancelSpeculation,
-    debug,
-    isEnvironmentSafe,
-    historyRef, // Added historyRef dependency
-  ]);
+  }, [subscribe, handleTick]);
 
   const commit = useCallback(async (): Promise<T> => {
-    if (debug) console.log("👆 [Precognition] COMMIT Triggered");
-
     if (status === "ready" && result) {
       setStatus("committed");
       return result;
     }
-
     if (shadowPromise.current) {
       setStatus("committed");
       return shadowPromise.current;
     }
-
     setStatus("committed");
     return action(new AbortController().signal);
-  }, [status, result, action, debug]);
+  }, [status, result, action]);
 
   return { commit, status, result };
 }

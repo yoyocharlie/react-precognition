@@ -1,8 +1,5 @@
 export interface VectorConfig {
-  /**
-   * Number of mouse events to retain for smoothing.
-   * NOTE: In the global provider model, the provider determines the max history size.
-   */
+  /** Number of history points to use for calculation. */
   historySize: number;
   noiseThreshold: number;
   maxInfluenceDistance: number;
@@ -25,24 +22,19 @@ export class VectorIntentEngine {
     this.config = { ...DEFAULT_CONFIG, ...config };
   }
 
-  // REMOVED: update(e) and this.history
-  // The engine is now a "Pure Calculator" for a specific target configuration.
-
   /**
-   * Calculates probability (0-1) that the user is aiming for this target.
-   * @param targetRect The bounding box of the interactive element
-   * @param globalHistory The shared history buffer from the global provider
+   * Pure calculation. No side effects.
    */
   public getIntentScore(targetRect: DOMRect, globalHistory: Point[]): number {
-    // 1. DATA SUFFICIENCY CHECK
-    // We use the configured history size, or whatever is available if less.
+    // 1. Slice the relevant history for this specific component's config
     const relevantHistory = globalHistory.slice(-this.config.historySize);
 
+    // Need at least 3 points for velocity/acceleration math
     if (relevantHistory.length < 3) return 0;
 
     const current = relevantHistory[relevantHistory.length - 1];
 
-    // 2. HIT TEST
+    // 2. HIT TEST (User is already inside)
     if (
       current.x >= targetRect.left &&
       current.x <= targetRect.right &&
@@ -52,12 +44,12 @@ export class VectorIntentEngine {
       return 1.0;
     }
 
-    // 3. TARGET GEOMETRY
+    // 3. DISTANCE CHECK
     const targetCenterX = targetRect.left + targetRect.width / 2;
     const targetCenterY = targetRect.top + targetRect.height / 2;
-
     const dx = targetCenterX - current.x;
     const dy = targetCenterY - current.y;
+    // Fast distance check (hypot is slightly slower than manual sqrt, but cleaner)
     const distanceToTarget = Math.sqrt(dx * dx + dy * dy);
 
     if (distanceToTarget > this.config.maxInfluenceDistance) return 0;
@@ -70,7 +62,6 @@ export class VectorIntentEngine {
 
     // Velocity 1 (Past)
     const dt1 = midPoint.timestamp - startPoint.timestamp;
-    // Fix: Prevent division by zero if events fire in same tick
     const speed1 =
       dt1 > 0
         ? Math.hypot(midPoint.x - startPoint.x, midPoint.y - startPoint.y) / dt1
