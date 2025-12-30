@@ -19,5 +19,5 @@ Precognition: Cursor Approach (-200ms) -> Network Request (200ms) -> User Clicks
 ## Installation
 
 ```bash
-npm install react-precognition
+pnpm add react-precognition
 ```
